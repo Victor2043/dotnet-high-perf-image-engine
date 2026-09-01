@@ -5,6 +5,7 @@ using SkiaSharp;
 using Spectre.Console;
 using HighPerfImageEngine.Domain.Enums;
 using HighPerfImageEngine.Core.Processing;
+using HighPerfImageEngine.Core.Ui;
 
 namespace HighPerfImageEngine.Core.Pipeline
 {
@@ -12,7 +13,6 @@ namespace HighPerfImageEngine.Core.Pipeline
     {
         public void ProcessImage(string inputDir, string outputDir)
         {                       
-
           
             string[] imageExtensions = [".jpg", ".jpeg", ".png", ".webp"];
             string[] inputFiles = Directory.GetFiles(inputDir)
@@ -104,23 +104,7 @@ namespace HighPerfImageEngine.Core.Pipeline
                     FileInfo outputInfo = new FileInfo(outputPath);
 
                     // Dashboard
-                    var table = new Table()
-                        .Border(TableBorder.Rounded)
-                        .BorderColor(Color.Grey)
-                        .Title($"[bold green]RESULT: {fileName} -> WebP[/]")
-                        .AddColumn(new TableColumn("[bold cyan]Metric[/]").LeftAligned())
-                        .AddColumn(new TableColumn("[bold cyan]Value[/]").RightAligned());
-
-                    table.AddRow("Input File", Path.GetFileName(filePath));
-                    table.AddRow("Detected Format", detectedFormat.ToString());
-                    table.AddRow("Resolution", $"{bitmap.Width} x {bitmap.Height} px");
-                    table.AddRow("Final Size (WebP)", $"{outputInfo.Length / 1024.0:N1} KB");
-                    table.AddRow("SIMD Kernel Time", $"[bold green]{swSimd.Elapsed.TotalMicroseconds:N2} µs[/]");
-                    table.AddRow("Total Pipeline Time", $"{swTotal.Elapsed.TotalMilliseconds:N2} ms");
-                    table.AddRow("GC Allocation", bytesAllocated < 2000 ? "[bold green]Near Zero[/]" : $"{bytesAllocated:N0} Bytes");
-
-                    AnsiConsole.Write(table);
-                    AnsiConsole.WriteLine();
+                    ConsoleUiService.RenderResultTable(fileName, filePath, detectedFormat, bitmap, outputInfo, swSimd, swTotal, bytesAllocated);
                 }
                 catch (Exception ex)
                 {
