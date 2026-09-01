@@ -1,16 +1,11 @@
 ﻿using HighPerfImageEngine.Core.Pipeline;
-using Spectre.Console;
+using HighPerfImageEngine.Core.Ui;
 
 // ============================================================================
 // 1. DIRECTORY AND ENVIRONMENT CONFIGURATION
 // ============================================================================
 
-AnsiConsole.Write(
-              new FigletText(".NET High-Perf Engine")
-                  .LeftJustified()
-                  .Color(Color.Cyan1));
-
-AnsiConsole.MarkupLine("[bold yellow]Starting direct processing engine via SkiaSharp + SIMD...[/]\n");
+ConsoleUiService.RenderBanner();
 
 string baseDir = AppContext.BaseDirectory;
 
