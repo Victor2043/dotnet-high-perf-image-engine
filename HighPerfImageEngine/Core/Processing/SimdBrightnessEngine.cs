@@ -4,9 +4,9 @@ using System.Runtime.Intrinsics;
 
 namespace HighPerfImageEngine.Core.Processing
 {
-    static class SimdBrightnessEngine
+    public static class SimdBrightnessEngine
     {
-        internal static void ApplyBrightnessSimdRgbOnly(Span<byte> data, byte brightnessOffset)
+        public static void ApplyBrightnessSimdRgbOnly(Span<byte> data, byte brightnessOffset)
         {
             int i = 0;
 
