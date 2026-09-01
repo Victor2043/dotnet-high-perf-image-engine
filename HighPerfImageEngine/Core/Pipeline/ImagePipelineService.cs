@@ -3,6 +3,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Runtime.Intrinsics;
 using SkiaSharp;
 using Spectre.Console;
+using HighPerfImageEngine.Domain.Enums;
 
 namespace HighPerfImageEngine.Core.Pipeline
 {
@@ -193,12 +194,4 @@ namespace HighPerfImageEngine.Core.Pipeline
             }
         }
     }
-}
-
-enum ImageFormat
-{
-    Unknown,
-    Jpeg,
-    Png,
-    Webp
 }
