@@ -2,9 +2,9 @@
 
 namespace HighPerfImageEngine.Core.Processing
 {
-    static class ImageFormatDetector
+    public static class ImageFormatDetector
     {
-        internal static ImageFormat DetectImageFormat(ReadOnlySpan<byte> header)
+        public static ImageFormat DetectImageFormat(ReadOnlySpan<byte> header)
         {
             if (header.Length < 12) return ImageFormat.Unknown;
 

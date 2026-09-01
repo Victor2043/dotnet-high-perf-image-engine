@@ -1,6 +1,6 @@
 ﻿namespace HighPerfImageEngine.Domain.Enums
 {
-    enum ImageFormat
+    public enum ImageFormat
     {
         Unknown,
         Jpeg,
