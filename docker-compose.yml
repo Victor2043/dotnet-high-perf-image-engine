@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # 1. Message Broker (RabbitMQ)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Produtor Python (Lê imagens de ./input_files e envia para a fila)
+  image-producer:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-slim
+        WORKDIR /app
+        COPY scripts/requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY scripts/producer.py .
+        CMD ["python", "producer.py"]
+    container_name: image-producer
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - DURATION_SECONDS=10
+      - INPUT_DIR=/app/input_files
+    volumes:
+      - ./input_files:/app/input_files
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # 3. Processador .NET SIMD (Consumer)
+  dotnet-engine:
+    build:
+      context: ./HighPerfImageEngine
+      dockerfile: Dockerfile
+    container_name: dotnet-engine
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - OUTPUT_DIR=/app/output_files
+    volumes:
+      - ./input_files:/app/input_files
+      - ./output_files:/app/output_files
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  rabbitmq_data:

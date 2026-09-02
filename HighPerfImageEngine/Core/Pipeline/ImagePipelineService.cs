@@ -1,114 +1,112 @@
 ﻿using System.Diagnostics;
-using System.Runtime.Intrinsics.X86;
-using SkiaSharp;
-using HighPerfImageEngine.Domain.Enums;
 using HighPerfImageEngine.Core.Processing;
-using HighPerfImageEngine.Core.Ui;
+using HighPerfImageEngine.Domain.Enums;
+using SkiaSharp;
 
-namespace HighPerfImageEngine.Core.Pipeline
+namespace HighPerfImageEngine.Core.Pipeline;
+
+public record ProcessResult(
+    string FileName,
+    ImageFormat DetectedFormat,
+    int Width,
+    int Height,
+    long OutputSizeBytes,
+    double SimdMicroseconds,
+    double TotalMilliseconds,
+    long AllocatedBytes,
+    bool SkippedDiskWrite // Flag for metric transparency
+);
+
+public class ImagePipelineService
 {
-    public class ImagePipelineService
+    public bool ProcessImageFromBytes(byte[] imageBytes, string fileName, string outputPath, byte brightnessOffset, out ProcessResult? result)
     {
-        public void ProcessImage(string inputDir, string outputDir)
-        {                       
-          
-            string[] imageExtensions = [".jpg", ".jpeg", ".png", ".webp"];
-            string[] inputFiles = Directory.GetFiles(inputDir)
-                .Where(f => imageExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
-                .ToArray();
+        result = null;
+        long initialMemory = GC.GetAllocatedBytesForCurrentThread();
 
-            if (inputFiles.Length == 0)
+        var swTotal = Stopwatch.StartNew();
+        var swSimd = new Stopwatch();
+
+        // 1. Payload Sanity Check (Magic Numbers)
+        if (imageBytes == null || imageBytes.Length < 12) return false;
+
+        ReadOnlySpan<byte> headerBuffer = imageBytes.AsSpan(0, 12);
+        ImageFormat detectedFormat = ImageFormatDetector.DetectImageFormat(headerBuffer);
+        if (detectedFormat == ImageFormat.Unknown) return false;
+
+        // 2. In-memory decoding via SkiaSharp (ALWAYS EXECUTES)
+        using var originalBitmap = SKBitmap.Decode(imageBytes);
+        if (originalBitmap == null) return false;
+
+        SKBitmap bitmapToProcess = originalBitmap;
+        bool isCopy = false;
+
+        if (originalBitmap.ColorType != SKColorType.Bgra8888)
+        {
+            bitmapToProcess = originalBitmap.Copy(SKColorType.Bgra8888);
+            if (bitmapToProcess == null) return false;
+            isCopy = true;
+        }
+
+        try
+        {
+            // 3. Execution of the SIMD Kernel on the pixel Span (ALWAYS EXECUTES)
+            Span<byte> pixelSpan;
+            unsafe
             {
-                ConsoleUiService.LogError($"No images found in directory:[/] {inputDir}");
-                ConsoleUiService.LogError("Add images (.jpg, .png, .webp) to this directory and run again.[/]");
-                return;
+                byte* ptr = (byte*)bitmapToProcess.GetPixels().ToPointer();
+                int byteCount = bitmapToProcess.ByteCount;
+                pixelSpan = new Span<byte>(ptr, byteCount);
             }
 
-            ConsoleUiService.LogInfo($"Files to process: {inputFiles.Length}[/]");
-            ConsoleUiService.LogInfo($"SIMD Hardware Support (AVX2):[/] {(Avx2.IsSupported ? "[bold green]YES (256-bit Vectorization)[/]" : "NO (Scalar Fallback)[/]")}\n");
+            swSimd.Start();
+            SimdBrightnessEngine.ApplyBrightnessSimdRgbOnly(pixelSpan, brightnessOffset);
+            swSimd.Stop();
 
-            // ============================================================================
-            // 2. FILE-BY-FILE PROCESSING
-            // ============================================================================
-            foreach (string filePath in inputFiles)
+            // 4. Persistence Guard (Processes WebP, but skips writing to disk if it already exists)
+            bool fileAlreadyExists = File.Exists(outputPath);
+            long outputSize = 0;
+
+            if (!fileAlreadyExists)
             {
-                string fileName = Path.GetFileNameWithoutExtension(filePath);
-                string outputPath = Path.Combine(outputDir, $"processed_{fileName}.webp");
+                using var image = SKImage.FromBitmap(bitmapToProcess);
+                using var data = image.Encode(SKEncodedImageFormat.Webp, 80);
 
-                long initialMemory = GC.GetAllocatedBytesForCurrentThread();
-
-                var swTotal = Stopwatch.StartNew();
-                var swSimd = new Stopwatch();
-
-                try
+                using (var outputStream = File.Create(outputPath))
                 {
-                    // 1. SAFETY VALIDATION AND SANITIZATION (MAGIC NUMBERS VIA SPAN)
-                    Span<byte> headerBuffer = stackalloc byte[12];
-                    using (var fs = File.OpenRead(filePath))
-                    {
-                        int bytesRead = fs.Read(headerBuffer);
-                        if (bytesRead < 12)
-                        {
-                            ConsoleUiService.LogError($"File corrupted or too small:[/] {fileName}");
-                            continue;
-                        }
-                    }
-
-                    ImageFormat detectedFormat = ImageFormatDetector.DetectImageFormat(headerBuffer);
-                    if (detectedFormat == ImageFormat.Unknown)
-                    {
-                        ConsoleUiService.LogError($"Invalid signature (Unrecognized Magic Numbers):[/] {fileName}");
-                        continue;
-                    }
-
-                    // 2. LOAD AND DECODE IMAGE
-                    using var originalBitmap = SKBitmap.Decode(filePath);
-                    if (originalBitmap == null)
-                    {
-                        ConsoleUiService.LogError($"Failed to decode image:[/] {fileName}");
-                        continue;
-                    }
-
-                    // Standardize color layout to BGRA8888 (4 bytes per pixel)
-                    using var bitmap = originalBitmap.ColorType == SKColorType.Bgra8888
-                        ? originalBitmap
-                        : originalBitmap.Copy(SKColorType.Bgra8888);
-
-                    // 3. GET DIRECT SPAN FROM SKIA MEMORY
-                    Span<byte> pixelSpan;
-                    unsafe
-                    {
-                        // Get native pixel pointer and create a writable Span without Heap allocation
-                        byte* ptr = (byte*)bitmap.GetPixels().ToPointer();
-                        int byteCount = bitmap.ByteCount;
-                        pixelSpan = new Span<byte>(ptr, byteCount);
-                    }
-
-                    // 4. SIMD AVX2 KERNEL
-                    swSimd.Start();
-                    SimdBrightnessEngine.ApplyBrightnessSimdRgbOnly(pixelSpan, brightnessOffset: 50);
-                    swSimd.Stop();
-
-                    // 5. ENCODE AND SAVE TO WEBP (STORAGE OPTIMIZATION AND METADATA STRIPPING)
-                    using var image = SKImage.FromBitmap(bitmap);
-                    using var data = image.Encode(SKEncodedImageFormat.Webp, 80);
-                    using var outputStream = File.Create(outputPath);
                     data.SaveTo(outputStream);
-
-                    swTotal.Stop();
-
-                    long finalMemory = GC.GetAllocatedBytesForCurrentThread();
-                    long bytesAllocated = finalMemory - initialMemory;
-                    FileInfo outputInfo = new FileInfo(outputPath);
-
-                    // Dashboard
-                    ConsoleUiService.RenderResultTable(fileName, filePath, detectedFormat, bitmap, outputInfo, swSimd, swTotal, bytesAllocated);
                 }
-                catch (Exception ex)
-                {
-                    ConsoleUiService.LogError($"Error processing {fileName}:[/] {ex.Message}");
-                }
-            }                     
+                outputSize = data.Size;
+            }
+            else
+            {
+                outputSize = new FileInfo(outputPath).Length;
+            }
+
+            swTotal.Stop();
+
+            long finalMemory = GC.GetAllocatedBytesForCurrentThread();
+
+            result = new ProcessResult(
+                FileName: fileName,
+                DetectedFormat: detectedFormat,
+                Width: bitmapToProcess.Width,
+                Height: bitmapToProcess.Height,
+                OutputSizeBytes: outputSize,
+                SimdMicroseconds: swSimd.Elapsed.TotalMicroseconds,
+                TotalMilliseconds: swTotal.Elapsed.TotalMilliseconds,
+                AllocatedBytes: Math.Max(0, finalMemory - initialMemory),
+                SkippedDiskWrite: fileAlreadyExists
+            );
+
+            return true;
+        }
+        finally
+        {
+            if (isCopy)
+            {
+                bitmapToProcess.Dispose();
+            }
         }
     }
 }
