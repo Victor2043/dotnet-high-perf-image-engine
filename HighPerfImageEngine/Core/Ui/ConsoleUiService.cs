@@ -22,11 +22,10 @@ namespace HighPerfImageEngine.Core.Ui
         public static void LogWarning(string message) => AnsiConsole.MarkupLine($"[bold yellow]{Markup.Escape(message)}[/]");
         public static void LogError(string message) => AnsiConsole.MarkupLine($"[bold red]{Markup.Escape(message)}[/]");
 
-        internal static void RenderResultTable(
+        internal static void RenderResultTableByImage(
             ProcessResult result,
             long currentAllocatedBytes,
-            double globalTotalSeconds,
-            long globalTotalAllocatedBytes)
+            double globalTotalSeconds)
         
             {
             var table = new Table()
@@ -44,8 +43,53 @@ namespace HighPerfImageEngine.Core.Ui
             table.AddRow("Total Pipeline Time", $"{result.TotalMilliseconds:N2} ms");
             table.AddRow("GC Allocation", $"{result.AllocatedBytes:N0} Bytes");
             table.AddRow("[bold yellow]Global Elapsed Time[/]", $"[bold yellow]{globalTotalSeconds:N2} s[/]");
-            table.AddRow("[bold yellow]Total Allocated (GC)[/]", $"[bold yellow]{globalTotalAllocatedBytes / (1024.0 * 1024.0):N2} MB[/]");
 
+            AnsiConsole.Write(table);
+            AnsiConsole.WriteLine();
+        }
+
+        public static void RenderResultTable(
+            long totalProcessedMessages,
+            double globalTotalSeconds,
+            long globalTotalAllocatedBytes)
+        {
+            double msgsPerSecond = globalTotalSeconds > 0 ? totalProcessedMessages / globalTotalSeconds : 0;
+            double msgsPerMinute = msgsPerSecond * 60;
+            double avgTimePerMsgMs = totalProcessedMessages > 0 ? (globalTotalSeconds * 1000.0) / totalProcessedMessages : 0;
+            double avgAllocPerMsgKb = totalProcessedMessages > 0 ? (globalTotalAllocatedBytes / 1024.0) / totalProcessedMessages : 0;
+
+            // GC metrics
+            int gen0Collections = GC.CollectionCount(0);
+            int gen1Collections = GC.CollectionCount(1);
+            int gen2Collections = GC.CollectionCount(2);
+            long totalMemoryHeapMB = GC.GetTotalMemory(forceFullCollection: false) / (1024 * 1024);
+
+            var table = new Table()
+                .Border(TableBorder.DoubleEdge)
+                .BorderColor(Color.Cyan1)
+                .Title("[bold green]=== EXECUTION SUMMARY & BENCHMARK REPORT ===[/]")
+                .AddColumn(new TableColumn("[bold cyan]Category[/]").LeftAligned())
+                .AddColumn(new TableColumn("[bold cyan]Metric[/]").LeftAligned())
+                .AddColumn(new TableColumn("[bold cyan]Value[/]").RightAligned());
+
+            // Throughput & Processing
+            table.AddRow("[bold yellow]Throughput[/]", "Total Messages Processed", $"[bold green]{totalProcessedMessages:N0}[/]");
+            table.AddRow("[bold yellow]Throughput[/]", "Messages / Second", $"[bold green]{msgsPerSecond:N2} msg/s[/]");
+            table.AddRow("[bold yellow]Throughput[/]", "Messages / Minute", $"[bold green]{msgsPerMinute:N0} msg/min[/]");
+            table.AddRow("[bold yellow]Performance[/]", "Global Elapsed Time", $"{globalTotalSeconds:N2} s");
+            table.AddRow("[bold yellow]Performance[/]", "Avg Latency per Msg", $"{avgTimePerMsgMs:N2} ms");
+
+            table.AddEmptyRow();
+
+            // Memory & GC
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Total Allocated Bytes", $"{globalTotalAllocatedBytes / (1024.0 * 1024.0):N2} MB");
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Avg Allocation per Msg", $"{avgAllocPerMsgKb:N2} KB");
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Gen 0 Collections", $"{gen0Collections}");
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Gen 1 Collections", $"{gen1Collections}");
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Gen 2 Collections", $"{gen2Collections}");
+            table.AddRow("[bold magenta]Memory (GC)[/]", "Current Live Heap", $"{totalMemoryHeapMB:N2} MB");
+
+            AnsiConsole.WriteLine();
             AnsiConsole.Write(table);
             AnsiConsole.WriteLine();
         }

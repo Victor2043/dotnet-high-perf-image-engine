@@ -1,10 +1,22 @@
 {
-  "profiles": {
-    "HighPerfImageEngine": {
-      "commandName": "Project"
-    },
-    "Container (Dockerfile)": {
-      "commandName": "Docker"
+    "profiles": {
+        "HighPerfImageEngine (Development)": {
+            "commandName": "Project",
+            "environmentVariables": {
+                "DOTNET_ENVIRONMENT": "Development"
+            }
+        },
+        "HighPerfImageEngine (Production)": {
+            "commandName": "Project",
+            "environmentVariables": {
+                "DOTNET_ENVIRONMENT": "Production"
+            }
+        },
+        "Container (Dockerfile)": {
+            "commandName": "Docker",
+            "environmentVariables": {
+                "DOTNET_ENVIRONMENT": "Production"
+            }
+        }
     }
-  }
 }

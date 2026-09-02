@@ -33,7 +33,7 @@ services:
     container_name: image-producer
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - DURATION_SECONDS=10
+      - DURATION_SECONDS=3
       - INPUT_DIR=/app/input_files
     volumes:
       - ./input_files:/app/input_files
@@ -48,6 +48,7 @@ services:
       dockerfile: Dockerfile
     container_name: dotnet-engine
     environment:
+      - DOTNET_ENVIRONMENT=PRODUCTION
       - RABBITMQ_HOST=rabbitmq
       - OUTPUT_DIR=/app/output_files
     volumes:
