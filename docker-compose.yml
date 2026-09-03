@@ -32,7 +32,7 @@ services:
     container_name: image-producer
     environment:
       - RABBITMQ_HOST=rabbitmq
-      - DURATION_SECONDS=3
+      - DURATION_SECONDS=5
       - INPUT_DIR=/app/input_files
     volumes:
       - ./input_files:/app/input_files
