@@ -1,5 +1,4 @@
 version: '3.8'
-
 services:
   # 1. Message Broker (RabbitMQ)
   rabbitmq:
@@ -42,6 +41,14 @@ services:
         condition: service_healthy
 
   # 3. Processador .NET SIMD (Consumer)
+  #
+  # CPU/memory limits are set EXPLICITLY here on purpose: they make the
+  # benchmark reproducible and comparable across machines. Whoever runs this
+  # project gets the same throughput ceiling regardless of how many cores
+  # their host actually has — and bumping these numbers on a beefier machine
+  # (e.g. a larger AWS instance) is exactly the "give it more, get more"
+  # story worth telling in a README/post, instead of an opaque number that
+  # depends on whatever Docker happened to expose.
   dotnet-engine:
     build:
       context: ./HighPerfImageEngine
@@ -51,12 +58,27 @@ services:
       - DOTNET_ENVIRONMENT=PRODUCTION
       - RABBITMQ_HOST=rabbitmq
       - OUTPUT_DIR=/app/output_files
+      - MALLOC_ARENA_MAX=2
+      - DOTNET_GCHeapCount=2
     volumes:
       - ./input_files:/app/input_files
       - ./output_files:/app/output_files
     depends_on:
       rabbitmq:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          # Hard CPU budget for the container, in "logical cores". 2.0 here
+          # roughly mirrors a small cloud instance (e.g. an AWS t3.medium's
+          # 2 vCPUs) — a natural reference point for a benchmark write-up.
+          cpus: "2.0"
+          # Give it enough headroom that memory is never the bottleneck;
+          # this workload is CPU-bound, not memory-bound, by design.
+          memory: 1024M
+        reservations:
+          cpus: "2.0"
+          memory: 512M
 
 volumes:
   rabbitmq_data:
