@@ -14,12 +14,28 @@ public record ProcessResult(
     double SimdMicroseconds,
     double TotalMilliseconds,
     long AllocatedBytes,
-    bool SkippedDiskWrite // Flag for metric transparency
+    bool WrittenToDisk // Whether this particular result was sampled to disk
 );
 
 public class ImagePipelineService
 {
-    public bool ProcessImageFromBytes(byte[] imageBytes, string fileName, string outputPath, byte brightnessOffset, out ProcessResult? result)
+    /// <summary>
+    /// Decodes, brightness-filters (SIMD) and WebP-encodes an image.
+    ///
+    /// `writeToDisk` controls ONLY whether the encoded bytes are persisted —
+    /// decode + SIMD + encode ALWAYS run in full for every message. This is
+    /// what makes the benchmark numbers honest: previously, once a given
+    /// filename had been written once, every subsequent message for that same
+    /// filename skipped the entire WebP encode step (the actual workload being
+    /// measured), silently inflating throughput over the course of a run.
+    /// </summary>
+    public bool ProcessImageFromBytes(
+        ReadOnlySpan<byte> imageBytes,
+        string fileName,
+        string outputPath,
+        byte brightnessOffset,
+        bool writeToDisk,
+        out ProcessResult? result)
     {
         result = null;
         long initialMemory = GC.GetAllocatedBytesForCurrentThread();
@@ -28,13 +44,16 @@ public class ImagePipelineService
         var swSimd = new Stopwatch();
 
         // 1. Payload Sanity Check (Magic Numbers)
-        if (imageBytes == null || imageBytes.Length < 12) return false;
+        if (imageBytes.Length < 12) return false;
 
-        ReadOnlySpan<byte> headerBuffer = imageBytes.AsSpan(0, 12);
-        ImageFormat detectedFormat = ImageFormatDetector.DetectImageFormat(headerBuffer);
+        ImageFormat detectedFormat = ImageFormatDetector.DetectImageFormat(imageBytes[..12]);
         if (detectedFormat == ImageFormat.Unknown) return false;
 
-        // 2. In-memory decoding via SkiaSharp (ALWAYS EXECUTES)
+        // 2. In-memory decoding via SkiaSharp.
+        // SKBitmap.Decode(ReadOnlySpan<byte>) copies the span straight into
+        // memory Skia owns natively — that copy does not land on the managed
+        // .NET heap, so it does not add to GC pressure the way a managed
+        // byte[] copy would, and we skip the extra SKData wrapping step.
         using var originalBitmap = SKBitmap.Decode(imageBytes);
         if (originalBitmap == null) return false;
 
@@ -63,24 +82,23 @@ public class ImagePipelineService
             SimdBrightnessEngine.ApplyBrightnessSimdRgbOnly(pixelSpan, brightnessOffset);
             swSimd.Stop();
 
-            // 4. Persistence Guard (Processes WebP, but skips writing to disk if it already exists)
-            bool fileAlreadyExists = File.Exists(outputPath);
-            long outputSize = 0;
+            // 4. Encoding ALWAYS executes — this is the real workload.
+            using var image = SKImage.FromBitmap(bitmapToProcess);
+            using var data = image.Encode(SKEncodedImageFormat.Webp, 80);
 
-            if (!fileAlreadyExists)
-            {
-                using var image = SKImage.FromBitmap(bitmapToProcess);
-                using var data = image.Encode(SKEncodedImageFormat.Webp, 80);
+            long outputSize = data.Size;
 
-                using (var outputStream = File.Create(outputPath))
-                {
-                    data.SaveTo(outputStream);
-                }
-                outputSize = data.Size;
-            }
-            else
-            {
-                outputSize = new FileInfo(outputPath).Length;
+            if (writeToDisk)
+            {              
+                using var outputStream = new FileStream(
+                    outputPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 4096,
+                    useAsync: false);
+
+                data.SaveTo(outputStream);
             }
 
             swTotal.Stop();
@@ -96,7 +114,7 @@ public class ImagePipelineService
                 SimdMicroseconds: swSimd.Elapsed.TotalMicroseconds,
                 TotalMilliseconds: swTotal.Elapsed.TotalMilliseconds,
                 AllocatedBytes: Math.Max(0, finalMemory - initialMemory),
-                SkippedDiskWrite: fileAlreadyExists
+                WrittenToDisk: writeToDisk
             );
 
             return true;
