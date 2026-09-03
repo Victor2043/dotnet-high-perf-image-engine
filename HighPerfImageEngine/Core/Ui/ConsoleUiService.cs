@@ -22,36 +22,23 @@ namespace HighPerfImageEngine.Core.Ui
         public static void LogWarning(string message) => AnsiConsole.MarkupLine($"[bold yellow]{Markup.Escape(message)}[/]");
         public static void LogError(string message) => AnsiConsole.MarkupLine($"[bold red]{Markup.Escape(message)}[/]");
 
-        internal static void RenderResultTableByImage(
-            ProcessResult result,
-            long currentAllocatedBytes,
-            double globalTotalSeconds)
-        
-            {
-            var table = new Table()
-                .Border(TableBorder.Rounded)
-                .BorderColor(Color.Grey)
-                .Title($"[bold green]PROCESSED: {result.FileName} -> WebP[/]")
-                .AddColumn(new TableColumn("[bold cyan]Metric[/]").LeftAligned())
-                .AddColumn(new TableColumn("[bold cyan]Value[/]").RightAligned());
-
-            table.AddRow("Original File", result.FileName);
-            table.AddRow("Detected Format", result.DetectedFormat.ToString());
-            table.AddRow("Resolution", $"{result.Width} x {result.Height} px");
-            table.AddRow("Final Size (WebP)", $"{result.OutputSizeBytes / 1024.0:N1} KB");
-            table.AddRow("SIMD Kernel Time", $"[bold green]{result.SimdMicroseconds:N2} µs[/]");
-            table.AddRow("Total Pipeline Time", $"{result.TotalMilliseconds:N2} ms");
-            table.AddRow("GC Allocation", $"{result.AllocatedBytes:N0} Bytes");
-            table.AddRow("[bold yellow]Global Elapsed Time[/]", $"[bold yellow]{globalTotalSeconds:N2} s[/]");
-
-            AnsiConsole.Write(table);
-            AnsiConsole.WriteLine();
-        }
-
+        /// <summary>
+        /// Renders the final benchmark summary.
+        ///
+        /// The three "diagnostic" parameters (avgPipelineMs/avgAckMs/avgChannelWaitMs)
+        /// are optional (default 0) so callers that don't track this breakdown can
+        /// still call this method without changes; when any of them is > 0, a
+        /// "Diagnostics" section is appended to the table showing exactly where
+        /// per-message time is going — pipeline (decode+SIMD+encode) vs. the
+        /// Ack/Nack round-trip vs. Channel<T> backpressure wait.
+        /// </summary>
         public static void RenderResultTable(
             long totalProcessedMessages,
             double globalTotalSeconds,
-            long globalTotalAllocatedBytes)
+            long globalTotalAllocatedBytes,
+            double avgPipelineMs = 0,
+            double avgAckMs = 0,
+            double avgChannelWaitMs = 0)
         {
             double msgsPerSecond = globalTotalSeconds > 0 ? totalProcessedMessages / globalTotalSeconds : 0;
             double msgsPerMinute = msgsPerSecond * 60;
@@ -88,6 +75,15 @@ namespace HighPerfImageEngine.Core.Ui
             table.AddRow("[bold magenta]Memory (GC)[/]", "Gen 1 Collections", $"{gen1Collections}");
             table.AddRow("[bold magenta]Memory (GC)[/]", "Gen 2 Collections", $"{gen2Collections}");
             table.AddRow("[bold magenta]Memory (GC)[/]", "Current Live Heap", $"{totalMemoryHeapMB:N2} MB");
+
+            if (avgPipelineMs > 0 || avgAckMs > 0 || avgChannelWaitMs > 0)
+            {
+                table.AddEmptyRow();
+
+                table.AddRow("[bold blue]Diagnostics[/]", "Avg Pipeline (decode+SIMD+encode)", $"{avgPipelineMs:N2} ms");
+                table.AddRow("[bold blue]Diagnostics[/]", "Avg Ack/Nack Round-Trip", $"{avgAckMs:N2} ms");
+                table.AddRow("[bold blue]Diagnostics[/]", "Avg Channel Enqueue Wait", $"{avgChannelWaitMs:N2} ms");
+            }
 
             AnsiConsole.WriteLine();
             AnsiConsole.Write(table);

@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace HighPerfImageEngine.Core.Pipeline;
+namespace HighPerfImageEngine.Domain.Payload;
 
 public record ImageMessagePayload(
     [property: JsonPropertyName("file_name")] string FileName,
