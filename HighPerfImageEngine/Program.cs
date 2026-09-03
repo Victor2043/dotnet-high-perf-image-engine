@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using HighPerfImageEngine.Config;
+using HighPerfImageEngine.Core.Messaging;
 using HighPerfImageEngine.Core.Pipeline;
 using HighPerfImageEngine.Core.Ui;
 using Microsoft.Extensions.Configuration;
@@ -66,133 +67,22 @@ public class Program
     public static async Task Main(string[] args)
     {
         var configuration = BuildConfiguration();
-
-        var settings =
-            configuration.Get<EngineSettings>()
-            ?? new EngineSettings();
+        var settings = configuration.Get<EngineSettings>() ?? new EngineSettings();
 
         ConsoleUiService.RenderBanner();
 
         var pipelineService = new ImagePipelineService();
 
-        string outputDirectory =
-            Environment.GetEnvironmentVariable("OUTPUT_DIR")
-            ?? "/app/output_files";
-
+        string outputDirectory = Environment.GetEnvironmentVariable("OUTPUT_DIR") ?? "/app/output_files";
         Directory.CreateDirectory(outputDirectory);
 
-        var factory = new ConnectionFactory
-        {
-            HostName =
-                Environment.GetEnvironmentVariable("RABBITMQ_HOST")
-                ?? "localhost",
+        var resources = await RabbitMqConnectionFactory.CreateConnectionAndChannelAsync(settings);
+        if (resources == null) return;
 
-            UserName = "guest",
-            Password = "guest"
-        };
+        using var connection = resources.Value.Connection;
+        using var channel = resources.Value.Channel;
 
-        IConnection? connection = null;
-        IChannel? channel = null;
-
-        for (int attempt = 1; attempt <= 10; attempt++)
-        {
-            try
-            {
-                if (settings.Logging.EnableUiLogs)
-                {
-                    ConsoleUiService.LogInfo(
-                        $"Attempting to connect to RabbitMQ " +
-                        $"(attempt {attempt}/10)...");
-                }
-
-                connection =
-                    await factory.CreateConnectionAsync();
-
-                channel =
-                    await connection.CreateChannelAsync();
-
-                if (settings.Logging.EnableUiLogs)
-                {
-                    ConsoleUiService.LogSuccess(
-                        "Successfully connected to RabbitMQ!");
-                }
-
-                break;
-            }
-            catch (Exception ex)
-            {
-                if (settings.Logging.EnableUiLogs)
-                {
-                    ConsoleUiService.LogWarning(
-                        $"Broker unreachable: {ex.Message}. " +
-                        "Waiting 3s...");
-                }
-
-                await Task.Delay(3000);
-            }
-        }
-
-        if (connection == null || channel == null)
-        {
-            ConsoleUiService.LogError(
-                "Could not establish connection to RabbitMQ. " +
-                "Terminating.");
-
-            return;
-        }
-
-        await channel.BasicQosAsync(
-            prefetchSize: 0,
-            prefetchCount: settings.RabbitMq.PrefetchCount,
-            global: false);
-
-        // Dead-letter exchange and queue.
-        await channel.ExchangeDeclareAsync(
-            exchange: settings.RabbitMq.DlxExchange,
-            type: ExchangeType.Direct,
-            durable: true);
-
-        await channel.QueueDeclareAsync(
-            queue: settings.RabbitMq.DlqQueue,
-            durable: true,
-            exclusive: false,
-            autoDelete: false);
-
-        await channel.QueueBindAsync(
-            queue: settings.RabbitMq.DlqQueue,
-            exchange: settings.RabbitMq.DlxExchange,
-            routingKey: settings.RabbitMq.DlqRoutingKey);
-
-        // Main queue topology.
-        var mainQueueArgs =
-            new Dictionary<string, object?>
-            {
-                {
-                    "x-dead-letter-exchange",
-                    settings.RabbitMq.DlxExchange
-                },
-                {
-                    "x-dead-letter-routing-key",
-                    settings.RabbitMq.DlqRoutingKey
-                }
-            };
-
-        await channel.ExchangeDeclareAsync(
-            exchange: settings.RabbitMq.MainExchange,
-            type: ExchangeType.Direct,
-            durable: true);
-
-        await channel.QueueDeclareAsync(
-            queue: settings.RabbitMq.MainQueue,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: mainQueueArgs);
-
-        await channel.QueueBindAsync(
-            queue: settings.RabbitMq.MainQueue,
-            exchange: settings.RabbitMq.MainExchange,
-            routingKey: settings.RabbitMq.MainRoutingKey);
+        await RabbitMqTopologyBuilder.DeclareTopologyAsync(channel, settings.RabbitMq);
 
         // 0 means "auto": use every logical processor available to the container.
         int degreeOfParallelism =
