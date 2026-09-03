@@ -25,16 +25,7 @@ public class Program
     }
 
     public static async Task Main(string[] args)
-    {
-        if (string.Equals(
-                Environment.GetEnvironmentVariable("PIPELINE_ONLY_BENCHMARK"),
-                "true",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            await PipelineOnlyBenchmark.RunAsync();
-            return;
-        }
-
+    {        
         var configuration = BuildConfiguration();
         var settings = configuration.Get<EngineSettings>() ?? new EngineSettings();
 
