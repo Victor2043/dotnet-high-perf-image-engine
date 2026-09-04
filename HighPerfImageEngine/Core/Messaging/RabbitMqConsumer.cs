@@ -17,6 +17,7 @@ namespace HighPerfImageEngine.Core.Messaging;
 public sealed class RabbitMqConsumer
 {
     private const string BatchCompletedMessageType = "batch_completed";
+    private const string ReadinessProbeMessageType = "readiness_probe";
 
     private readonly IChannel _channel;
     private readonly EngineSettings _settings;
@@ -54,6 +55,8 @@ public sealed class RabbitMqConsumer
 
     private async Task OnReceivedAsync(object model, BasicDeliverEventArgs ea)
     {
+        _metrics.RecordDeliveryReceived();
+
         try
         {
             // Check whether this is the final batch marker.
@@ -82,6 +85,17 @@ public sealed class RabbitMqConsumer
                 return;
             }
 
+            // The producer sends one throwaway probe message before it
+            // starts the real benchmark, purely to confirm this queue's
+            // binding already exists (avoiding a startup race). It's
+            // infrastructure, not data: ack it and move on without touching
+            // any of the Processed/Failed/Expected accounting.
+            if (IsReadinessProbe(ea.Body))
+            {
+                await _ackDispatcher.AckAsync(ea.DeliveryTag);
+                return;
+            }
+
             int deathCount = GetRetryCountFromHeaders(ea.BasicProperties.Headers);
 
             // Cheap, synchronous parse (JSON scan + Base64 decode into a
@@ -95,6 +109,11 @@ public sealed class RabbitMqConsumer
                     ConsoleUiService.LogError("Malformed message payload. Sending to DLQ.");
                 }
 
+                // Count this so Processed + Failed always adds up to Expected
+                // in the final report — a malformed payload is a legitimate
+                // terminal outcome, not a message that silently vanishes.
+                _metrics.RecordFailed();
+
                 await _ackDispatcher.NackAsync(ea.DeliveryTag, requeue: false);
                 return;
             }
@@ -107,6 +126,25 @@ public sealed class RabbitMqConsumer
         catch (Exception ex)
         {
             ConsoleUiService.LogError($"Unhandled consumer error: {ex.Message}");
+        }
+    }
+
+    private static bool IsReadinessProbe(ReadOnlyMemory<byte> body)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(body);
+            JsonElement root = document.RootElement;
+
+            return root.TryGetProperty("message_type", out JsonElement messageType) &&
+                   string.Equals(
+                       messageType.GetString(),
+                       ReadinessProbeMessageType,
+                       StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 

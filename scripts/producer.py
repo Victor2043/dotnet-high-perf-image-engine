@@ -57,9 +57,20 @@ def load_images_to_memory(input_dir):
     return cache
 
 
-def create_connection(rabbit_host):
-    """Create a RabbitMQ connection with retry logic."""
-    for attempt in range(1, 16):
+def create_connection(rabbit_host, max_attempts=40, delay_seconds=2):
+    """
+    Create a RabbitMQ connection with retry logic.
+
+    A generous budget on purpose: RabbitMQ's own boot time varies a lot
+    depending on the machine and whether it's initializing its Mnesia
+    database for the first time (a fresh rabbitmq_data volume can take well
+    over 20 seconds to become ready). The Docker healthcheck can also report
+    "healthy" slightly before the AMQP listener itself is accepting
+    connections, since it only pings the Erlang node. 40 attempts * 2s
+    gives up to ~80 seconds of slack, which comfortably covers a slow first
+    boot without hanging forever on a genuinely broken broker.
+    """
+    for attempt in range(1, max_attempts + 1):
         try:
             connection = pika.BlockingConnection(
                 pika.ConnectionParameters(
@@ -73,10 +84,10 @@ def create_connection(rabbit_host):
         except Exception as exc:
             print(
                 f"[RabbitMQ] Connection attempt "
-                f"{attempt}/15 failed: {exc}"
+                f"{attempt}/{max_attempts} failed: {exc}"
             )
 
-            time.sleep(1)
+            time.sleep(delay_seconds)
 
     return None
 
@@ -87,6 +98,7 @@ def worker_publisher(
     duration_seconds,
     image_cache,
     counter,
+    failed_counter,
 ):
     """Publish images from an independent worker process."""
     connection = create_connection(rabbit_host)
@@ -106,6 +118,21 @@ def worker_publisher(
         durable=True,
     )
 
+    # Publisher confirms turn "I called basic_publish" into "the broker
+    # actually accepted and routed this message". Without this, a
+    # successful basic_publish() call means nothing on its own: a swallowed
+    # channel error, a dropped connection, or the broker rejecting the
+    # message under memory pressure all look identical to success from the
+    # caller's point of view, and the local counter below would silently
+    # overcount messages that never actually reached the queue.
+    #
+    # This does turn each publish into a confirmed round-trip, which lowers
+    # THIS script's own reported publish throughput. That trade-off is
+    # intentional and does not affect the .NET consumer's own throughput
+    # measurement, which is timed independently on its side based on what
+    # it actually received and processed.
+    channel.confirm_delivery()
+
     properties = pika.BasicProperties(
         delivery_mode=2,
         content_type="application/json",
@@ -113,6 +140,7 @@ def worker_publisher(
 
     start_time = time.time()
     local_sent = 0
+    local_failed = 0
 
     try:
         while (time.time() - start_time) < duration_seconds:
@@ -126,27 +154,44 @@ def worker_publisher(
                 "brightness_offset": random.randint(30, 80),
             }
 
-            channel.basic_publish(
-                exchange=MAIN_EXCHANGE,
-                routing_key=MAIN_ROUTING_KEY,
-                body=json.dumps(payload),
-                properties=properties,
-            )
+            try:
+                channel.basic_publish(
+                    exchange=MAIN_EXCHANGE,
+                    routing_key=MAIN_ROUTING_KEY,
+                    body=json.dumps(payload),
+                    properties=properties,
+                    mandatory=True,
+                )
 
-            local_sent += 1
+                local_sent += 1
 
-            # Update the shared counter every 100 messages
-            # to reduce synchronization overhead.
-            if local_sent >= 100:
+            except (pika.exceptions.UnroutableError, pika.exceptions.NackError):
+                # The broker rejected or couldn't route this one (e.g. under
+                # memory pressure, or briefly before the consumer has
+                # declared the queue). Count it honestly instead of
+                # pretending it made it through.
+                local_failed += 1
+
+            # Update the shared counters every 100 messages to reduce
+            # synchronization overhead.
+            if local_sent + local_failed >= 100:
                 with counter.get_lock():
                     counter.value += local_sent
 
+                with failed_counter.get_lock():
+                    failed_counter.value += local_failed
+
                 local_sent = 0
+                local_failed = 0
 
         # Flush remaining messages.
         if local_sent > 0:
             with counter.get_lock():
                 counter.value += local_sent
+
+        if local_failed > 0:
+            with failed_counter.get_lock():
+                failed_counter.value += local_failed
 
     finally:
         connection.close()
@@ -181,8 +226,6 @@ def publish_batch_completed_message(
             durable=True,
         )
 
-        # Enable publisher confirms only for the final marker.
-        # This avoids affecting the image publishing benchmark.
         channel.confirm_delivery()
 
         properties = pika.BasicProperties(
@@ -213,6 +256,76 @@ def publish_batch_completed_message(
         connection.close()
 
 
+def wait_until_queue_is_ready(rabbit_host, timeout_seconds=60):
+    """
+    Blocks until a message can actually be routed to MAIN_ROUTING_KEY on
+    MAIN_EXCHANGE.
+
+    The .NET consumer is the one that declares the exchange/queue/binding on
+    startup, and Docker Compose has no built-in way to wait for "the other
+    service finished declaring its own internal topology" (only "the
+    container started" or "a health check passed"). Without this, the
+    producer can start blasting messages before the queue exists at all,
+    and every one of those early messages is silently unroutable — which is
+    exactly what was showing up as a big chunk of "failed" publishes.
+
+    This sends one small, harmless probe message (repeatedly, until it's
+    routed) using the same mandatory+confirm_delivery mechanism as the real
+    traffic. The .NET side will receive exactly one of these as a stray,
+    unparseable message and forward it to the DLQ — expected and harmless.
+    """
+    connection = create_connection(rabbit_host)
+
+    if connection is None:
+        raise RuntimeError("Could not connect to RabbitMQ to check readiness.")
+
+    try:
+        channel = connection.channel()
+
+        channel.exchange_declare(
+            exchange=MAIN_EXCHANGE,
+            exchange_type="direct",
+            durable=True,
+        )
+
+        channel.confirm_delivery()
+
+        deadline = time.time() + timeout_seconds
+        attempt = 0
+
+        while time.time() < deadline:
+            attempt += 1
+
+            try:
+                channel.basic_publish(
+                    exchange=MAIN_EXCHANGE,
+                    routing_key=MAIN_ROUTING_KEY,
+                    body=json.dumps({"message_type": "readiness_probe"}),
+                    properties=pika.BasicProperties(delivery_mode=1),
+                    mandatory=True,
+                )
+
+                print(
+                    f"[Python Producer] Consumer queue is ready "
+                    f"(probe succeeded after {attempt} attempt(s))."
+                )
+                return
+
+            except (pika.exceptions.UnroutableError, pika.exceptions.NackError):
+                print(
+                    f"[Python Producer] Waiting for the consumer to declare "
+                    f"its queue... (attempt {attempt})"
+                )
+                time.sleep(1)
+
+        raise RuntimeError(
+            f"Consumer queue never became routable within {timeout_seconds}s. "
+            "Is the dotnet-engine service up and connected to RabbitMQ?"
+        )
+    finally:
+        connection.close()
+
+
 def main():
     rabbit_host = os.getenv("RABBITMQ_HOST", "localhost")
     duration_seconds = int(
@@ -236,6 +349,12 @@ def main():
         )
         return
 
+    print(
+        "[Python Producer] Waiting for the consumer to be ready "
+        "to receive messages..."
+    )
+    wait_until_queue_is_ready(rabbit_host)
+
     batch_id = str(uuid.uuid4())
 
     print(
@@ -249,6 +368,7 @@ def main():
     )
 
     counter = mp.Value("q", 0)
+    failed_counter = mp.Value("q", 0)
 
     processes = []
 
@@ -264,6 +384,7 @@ def main():
                 duration_seconds,
                 image_cache,
                 counter,
+                failed_counter,
             ),
         )
 
@@ -281,7 +402,8 @@ def main():
             print(
                 f"\r[Python Producer] "
                 f"Elapsed: {elapsed:.1f}s / {duration_seconds}s | "
-                f"Sent: {current_count} msgs | "
+                f"Confirmed: {current_count} msgs | "
+                f"Failed: {failed_counter.value} | "
                 f"Throughput: {throughput:.1f} msgs/sec",
                 end="",
                 flush=True,
@@ -295,26 +417,35 @@ def main():
 
     total_time = time.time() - start_time
     total_messages = counter.value
+    total_failed = failed_counter.value
 
     print("\n")
 
     print("[Python Producer] Publishing phase completed!")
     print(
-        f"-> Total image messages published: {total_messages}"
+        f"-> Total image messages confirmed by broker: {total_messages}"
     )
+
+    if total_failed > 0:
+        print(
+            f"-> Messages rejected/unroutable (NOT counted as sent): {total_failed}"
+        )
+
     print(
         f"-> Publishing time: {total_time:.2f} seconds"
     )
 
     if total_time > 0:
         print(
-            f"-> Average throughput: "
+            f"-> Average confirmed throughput: "
             f"{total_messages / total_time:.2f} msgs/sec"
         )
 
     # IMPORTANT:
     # The completion marker is published only after all
-    # worker processes have finished.
+    # worker processes have finished, and expected_messages now reflects
+    # only messages the broker actually confirmed — not just how many
+    # times basic_publish() was called.
     print(
         "[Python Producer] Publishing final batch completion marker..."
     )

@@ -43,6 +43,13 @@ public static class BenchmarkReporter
                 $"Batch count mismatch! " +
                 $"Expected {snapshot.Expected:N0}, but processed " +
                 $"{snapshot.Processed:N0} and failed {snapshot.Failed:N0}.");
+
+            ConsoleUiService.LogWarning(
+                $"Diagnostic: RabbitMQ.Client actually delivered " +
+                $"{snapshot.ReceivedDeliveries:N0} messages to ReceivedAsync " +
+                $"(including the batch marker itself). If this is close to " +
+                $"Expected, the bug is in OUR completion logic. If it's much " +
+                $"lower, messages are being lost before they even reach us.");
         }
 
         ConsoleUiService.RenderResultTable(

@@ -18,6 +18,7 @@ public sealed class BenchmarkMetrics
     private long _activeMessageCount;
     private long _expectedMessageCount;
     private long _sampleWriteCounter;
+    private long _receivedDeliveryCount;
 
     private long _totalAckPathTicks;
     private long _ackPathSamples;
@@ -33,7 +34,11 @@ public sealed class BenchmarkMetrics
     public long ProcessedCount => Volatile.Read(ref _processedMessageCount);
     public long FailedCount => Volatile.Read(ref _failedMessageCount);
     public long ExpectedCount => Volatile.Read(ref _expectedMessageCount);
+    public long ReceivedDeliveryCount => Volatile.Read(ref _receivedDeliveryCount);
     public string? BatchId => _batchId;
+
+    /// <summary>Counts every delivery RabbitMQ.Client handed to ReceivedAsync, regardless of outcome. Diagnostic-only.</summary>
+    public void RecordDeliveryReceived() => Interlocked.Increment(ref _receivedDeliveryCount);
 
     /// <summary>Starts the benchmark clock exactly once, on whichever thread gets there first.</summary>
     public void StartTimerIfNeeded()
@@ -112,6 +117,7 @@ public sealed class BenchmarkMetrics
             Processed: processed,
             Failed: FailedCount,
             Expected: ExpectedCount,
+            ReceivedDeliveries: ReceivedDeliveryCount,
             BatchId: BatchId,
             ElapsedSeconds: Elapsed.TotalSeconds,
             TotalAllocatedBytes: Volatile.Read(ref _totalAllocatedBytes),
@@ -125,6 +131,7 @@ public sealed record BenchmarkSnapshot(
     long Processed,
     long Failed,
     long Expected,
+    long ReceivedDeliveries,
     string? BatchId,
     double ElapsedSeconds,
     long TotalAllocatedBytes,
