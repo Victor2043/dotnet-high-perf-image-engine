@@ -75,10 +75,10 @@ services:
           cpus: "2.0"
           # Give it enough headroom that memory is never the bottleneck;
           # this workload is CPU-bound, not memory-bound, by design.
-          memory: 1024M
+          memory: 512M
         reservations:
           cpus: "2.0"
-          memory: 512M
+          memory: 256M
 
 volumes:
   rabbitmq_data:
